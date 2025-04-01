@@ -2,6 +2,7 @@
 from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+import pandas as pd
 
 # DAG 정의
 dag = DAG(
@@ -15,7 +16,9 @@ dag = DAG(
 
 # 함수 설정
 def print_test():
-    print('Hello World')
+    my_dict = {"a": ['1', '3'], "b": ['1', '2'], "c": ['2', '4']}
+    data = pd.DataFrame(my_dict)
+    print(data.head())
 
 # task 설정
 t1 = PythonOperator( 
