@@ -40,6 +40,7 @@ test_task2 = KubernetesPodOperator(
     name="custom_comp_image",
     task_id="custom_comp_image",
     is_delete_operator_pod = False,
+    delete_worker_pods = False,
     get_logs=True,
     dag=dag,
 )
