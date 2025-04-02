@@ -1,1 +1,0 @@
-"""dags git-sync test"""
