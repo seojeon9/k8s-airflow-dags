@@ -39,6 +39,7 @@ test_task2 = KubernetesPodOperator(
     labels={"test": "k8s_executor"},
     name="custom_comp_image",
     task_id="custom_comp_image",
+    is_delete_operator_pod = False,
     get_logs=True,
     dag=dag,
 )
