@@ -31,7 +31,7 @@ channel_config = {
     # "musinsa_standard": {"upload_pdf": True, "upload_xlsx": True},
     # "naver_fashiontown": {"upload_pdf": True, "upload_xlsx": True},
     # "naverstyle": {"upload_pdf": True, "upload_xlsx": False},
-    "sonyunara": {"upload_pdf": True, "upload_xlsx": False},
+    # "sonyunara": {"upload_pdf": True, "upload_xlsx": False},
     # "stylenoriter": {"upload_pdf": True, "upload_xlsx": False},
     # "uniqlo": {"upload_pdf": False, "upload_xlsx": True},
     # "uniqlo_rank": {"upload_pdf": True, "upload_xlsx": False},
@@ -50,13 +50,13 @@ with DAG(
 ) as dag:
 
     # 1. craweler script 실행
-    @task
+    @task(trigger_rule=TriggerRule.ALL_DONE)
     def run_crawler_script(channel_name):
         context = get_current_context()
         pod_task = KubernetesPodOperator(
             task_id = f"run_crawler_script_{channel_name}",
             name = f"run-crawler-{channel_name}",
-            namespace = 'default',
+            namespace = 'airflow',
             pod_template_file="/root/airflow/dags/template/pod_template.yaml",
             image = "172.31.11.141:5000/comp-image:v1.0.0",
             cmds = ["python", "-u", f"/app/crawler_main.py", channel_name],
@@ -70,40 +70,74 @@ with DAG(
             }
         )
 
-        logs = pod_task.execute(context=context)
+        pod_task.execute(context=context)
+        
+        max_retries = 3
+        logs = None
+        
+        for attempt in range(max_retries):
+            try : 
+                logs_consumer = pod_task.pod_manager.read_pod_logs(
+                    pod=pod_task.pod,
+                    container_name=pod_task.pod.spec.containers[0].name,
+                )
+                logs = "".join(log.decode('utf-8') for log in logs_consumer)
+                if logs : 
+                    break 
+                time.sleep(5)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise ValueError(f"[{channel_name}] Failed to get pod logs after {max_retries} attempts: {str(e)}")
+                time.sleep(5)
+        
         if not logs:
             raise ValueError(f"[{channel_name}] No logs returned from pod execution.")
 
         # 출력 로그 중 JSON 부분 추출
-        json_pattern = r'S3 UPLOAD SUCCESS[:\s]*\n?(?P<json>\{.*\})'
-        match = re.search(json_pattern, logs.strip(), re.DOTALL)
+        json_pattern_1 =  r'\[.*?\] INFO: S3 UPLOAD SUCCESS:\s*(?P<json>\{.*?\})'
+        json_pattern_2 = r'S3 UPLOAD SUCCESS\s*\n\s*(?P<json>\{.*\})'
+
+        match = re.search(json_pattern_1, logs, re.DOTALL)
+        if not match:
+            match = re.search(json_pattern_2, logs, re.DOTALL)
+
+        print('로그추출 결과 : ', match)
 
         if not match:
-            raise ValueError(f"Could not extract JSON from output: {logs.strip()}")
+            raise ValueError(f"Could not extract JSON from output: {logs}")
 
         # JSON 출력 검증
         try:
-            json_result = json.loads(match.group())  # JSON 변환 확인
+            json_str = match.group('json')
+            json_result = json.loads(json_str)  # JSON 변환 확인
             return json_result
         except json.JSONDecodeError:
-            raise ValueError(f"Invalid JSON output from script: {logs.strip()}")
+            raise ValueError(f"Invalid JSON output from script: {logs}")
     run_crawler_script_task = run_crawler_script.expand(channel_name=channel_names)
 
 
     # 2. crawler 실행 후 저장한 S3 obj key 추출
-    @task
+    @task(trigger_rule=TriggerRule.ALL_DONE)
     def extract_s3_keys_from_xcom(channel_name):
         context = get_current_context()
         task_instance = context["ti"]  # 현재 TaskInstance 가져오기
+        map_index = task_instance.map_index
 
-        result_lazy = task_instance.xcom_pull(task_ids="run_crawler_script", key="return_value")
+        upstream_task = task_instance.xcom_pull(
+                            task_ids=f"run_crawler_script",
+                            map_indexes=[map_index], 
+                            key="return_value"
+                        )
+        
+        if upstream_task is None: 
+            raise AirflowSkipException(f"Skipping {channel_name} as crawler script failed")
 
         # LazyXComAccess 객체인지 확인 후 변환
-        if isinstance(result_lazy, LazyXComAccess):
-            result_list = list(result_lazy)  # LazyXComAccess → 리스트 변환
+        if isinstance(upstream_task, LazyXComAccess):
+            result_list = list(upstream_task)  # LazyXComAccess → 리스트 변환
             print(f"Converted LazyXComAccess to list: {result_list}")  # 디버깅 로그
         else:
-            result_list = result_lazy
+            result_list = upstream_task
 
         # 리스트 안에 딕셔너리 형태인지 확인 후 변환
         if isinstance(result_list, list) and len(result_list) > 0 and isinstance(result_list[0], dict):
@@ -125,7 +159,7 @@ with DAG(
 
 
     # 3. S3 obj key flatten
-    @task 
+    @task(trigger_rule=TriggerRule.ALL_DONE)
     def flatten_s3_keys(list_of_keys):
         flattened = []
         for item in list_of_keys:
@@ -153,7 +187,7 @@ with DAG(
 
 
     # 5. S3KeySensor 성공한 채널 목록 생성
-    @task
+    @task(trigger_rule=TriggerRule.ALL_DONE)
     def get_successful_channels(flattened_keys):
         # flattened_keys는 각 원소가 {"channel": <채널>, "s3_key": ...} 형태임
         channels = {entry["channel"] for entry in flattened_keys}
@@ -162,7 +196,7 @@ with DAG(
 
  
     #6-1 PDF 업로드 태스크
-    @task
+    @task(trigger_rule=TriggerRule.ALL_DONE)
     def run_upload_pdf_script(channel_name):
         if not channel_config.get(channel_name, {}).get("upload_pdf", False):
             print(f"[{channel_name}] Skipping PDF upload as per configuration")
@@ -172,7 +206,7 @@ with DAG(
         pod_task = KubernetesPodOperator(
             task_id=f"run_upload_pdf_script_{channel_name}",
             name=f"upload-pdf-{channel_name}",
-            namespace='default',
+            namespace='airflow',
             pod_template_file="/root/airflow/dags/template/pod_template.yaml",
             image="172.31.11.141:5000/comp-image:v1.0.0",
             cmds=["python", "-u", f"/app/upload_pdf.py", "--channel", channel_name],
@@ -199,7 +233,7 @@ with DAG(
     run_upload_pdf_script_task = run_upload_pdf_script.expand(channel_name=successful_channels)
 
     # 6-2. XLSX 업로드 태스크
-    @task
+    @task(trigger_rule=TriggerRule.ALL_DONE)
     def run_upload_xlsx_script(channel_name):
         if not channel_config.get(channel_name, {}).get("upload_xlsx", False):
             print(f"[{channel_name}] Skipping XLSX upload as per configuration")
@@ -210,7 +244,7 @@ with DAG(
         pod_task = KubernetesPodOperator(
             task_id=f"run_upload_xlsx_script_{channel_name}",
             name=f"upload-xlsx-{channel_name}",
-            namespace='default',
+            namespace='airflow',
             pod_template_file="/root/airflow/dags/template/pod_template.yaml",
             image="172.31.11.141:5000/comp-image:v1.0.0",
             cmds=["python", "-u", f"/app/upload_xlsx.py", "--channel", channel_name],
@@ -239,4 +273,4 @@ with DAG(
     
 
     # TASK dependencies
-    run_crawler_script_task >> extract_s3_keys_task >> flattened_s3_keys  >> s3_sensor_group >> successful_channels >> [run_upload_pdf_script_task, run_upload_xlsx_script_task]
+    run_crawler_script_task >> extract_s3_keys_task >> flattened_s3_keys  >> s3_sensor_group >> successful_channels >> [run_upload_pdf_script_task, run_upload_xlsx_script_task] 
