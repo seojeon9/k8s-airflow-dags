@@ -11,7 +11,7 @@ default_args = {
 }
 
 dag = DAG(
-    "k8s_executor_test",
+    "kpo_test_template",
     default_args=default_args,
     schedule_interval=None,  # 수동 실행
     catchup=False,
@@ -24,8 +24,8 @@ test_task = KubernetesPodOperator(
     cmds=["python", "-c"],
     arguments=["print('Hello from Kubernetes Executor!')"],
     labels={"test": "k8s_executor"},
-    name="k8s-executor-test",
-    task_id="test_k8s_executor",
+    name="python_test",
+    task_id="python_test",
     get_logs=True,
     dag=dag,
 )
