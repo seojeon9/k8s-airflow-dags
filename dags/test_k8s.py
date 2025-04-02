@@ -37,8 +37,8 @@ test_task2 = KubernetesPodOperator(
     cmds = ["python", "-u", f"/app/crawler_main.py", "hansome"],
     arguments=["print('Hello from Kubernetes Executor!')"],
     labels={"test": "k8s_executor"},
-    name="cumstom_comp_image",
-    task_id="cumstom_comp_image",
+    name="custom_comp_image",
+    task_id="custom_comp_image",
     get_logs=True,
     dag=dag,
 )
