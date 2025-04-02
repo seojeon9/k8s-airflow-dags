@@ -11,7 +11,7 @@ default_args = {
 }
 
 dag = DAG(
-    "kpo_test_template",
+    "kpo_test_dag",
     default_args=default_args,
     schedule_interval=None,  # 수동 실행
     catchup=False,
